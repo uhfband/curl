@@ -151,6 +151,7 @@ static void free_config_fields(struct OperationConfig *config)
   curlx_safefree(config->etag_compare_file);
   curlx_safefree(config->ssl_ec_curves);
   curlx_safefree(config->ssl_signature_algorithms);
+  curlx_safefree(config->fingerprint);
   curlx_safefree(config->request_target);
   curlx_safefree(config->customrequest);
   curlx_safefree(config->krblevel);

@@ -219,6 +219,7 @@ LIB_CFILES =         \
   fake_addrinfo.c    \
   file.c             \
   fileinfo.c         \
+  fingerprint.c      \
   formdata.c         \
   ftp.c              \
   ftplistparser.c    \
@@ -355,6 +356,7 @@ LIB_HFILES =         \
   fake_addrinfo.h    \
   file.h             \
   fileinfo.h         \
+  fingerprint.h      \
   formdata.h         \
   ftp.h              \
   ftp-int.h          \

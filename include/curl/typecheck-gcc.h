@@ -425,6 +425,7 @@ CURLWARNING(Wcurl_easy_getinfo_err_curl_off_t,
    (option) == CURLOPT_DOH_URL ||                                       \
    (option) == CURLOPT_ECH ||                                           \
    (option) == CURLOPT_EGDSOCKET ||                                     \
+   (option) == CURLOPT_FINGERPRINT ||                                   \
    (option) == CURLOPT_FTP_ACCOUNT ||                                   \
    (option) == CURLOPT_FTP_ALTERNATIVE_TO_USER ||                       \
    (option) == CURLOPT_FTPPORT ||                                       \

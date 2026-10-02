@@ -48,6 +48,7 @@ struct ssl_filter_config {
   struct curl_blob *issuercert_blob;
   struct curl_blob *key_blob;
   char *curves;          /* list of curves to use */
+  char *fingerprint;     /* CURLOPT_FINGERPRINT JSON */
   uint32_t version_max; /* max supported version the client wants to use */
   uint8_t ssl_options;  /* the CURLOPT_SSL_OPTIONS bitmask */
   uint8_t version;    /* what version the client wants to use */

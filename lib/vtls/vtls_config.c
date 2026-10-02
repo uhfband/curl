@@ -123,6 +123,7 @@ void Curl_ssl_config_cleanup(struct ssl_filter_config *sslc)
     curlx_safefree(sslc->issuercert_blob);
     curlx_safefree(sslc->key_blob);
     curlx_safefree(sslc->curves);
+    curlx_safefree(sslc->fingerprint);
     curlx_safefree(sslc->signature_algorithms);
     curlx_safefree(sslc->CRLfile);
     curlx_safefree(sslc->cert_type);
@@ -157,6 +158,7 @@ static bool match_ssl_primary_config(struct Curl_easy *data,
      curl_strequal(c1->cipher_list, c2->cipher_list) &&
      curl_strequal(c1->cipher_list13, c2->cipher_list13) &&
      curl_strequal(c1->curves, c2->curves) &&
+     Curl_safecmp(c1->fingerprint, c2->fingerprint) &&
      curl_strequal(c1->signature_algorithms, c2->signature_algorithms) &&
      Curl_safecmp(c1->CRLfile, c2->CRLfile) &&
      Curl_safecmp(c1->pinned_key, c2->pinned_key) &&
@@ -215,6 +217,7 @@ static bool clone_ssl_primary_config(struct ssl_filter_config *source,
   CLONE_STRING(cipher_list13);
   CLONE_STRING(pinned_key);
   CLONE_STRING(curves);
+  CLONE_STRING(fingerprint);
   CLONE_STRING(signature_algorithms);
   CLONE_STRING(CRLfile);
   /* SSL credentials: client certificate */
@@ -305,6 +308,7 @@ CURLcode Curl_ssl_filter_config_tmp_init(
     ssl_easy_steal(data, STRING_SSL_SIGNATURE_ALGORITHMS);
   ssl_origin->ca_info_blob = data->set.blobs[BLOB_CAINFO];
   ssl_origin->curves = ssl_easy_steal(data, STRING_SSL_EC_CURVES);
+  ssl_origin->fingerprint = ssl_easy_steal(data, STRING_FINGERPRINT);
   /* Maybe these should not be used for another origin. But for
    * backwards compatibility, keep them in. */
   ssl_origin->issuercert = ssl_easy_steal(data, STRING_SSL_ISSUERCERT);

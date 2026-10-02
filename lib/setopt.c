@@ -49,6 +49,7 @@
 #include "escape.h"
 #include "bufref.h"
 #include "vauth/vauth.h"
+#include "fingerprint.h"
 
 static CURLcode setopt_set_timeout_sec(timediff_t *ptimeout_ms, long secs)
 {
@@ -2000,6 +2001,30 @@ static CURLcode setopt_cptr_ssl(struct Curl_easy *data, CURLoption option,
     if(Curl_ssl_supports(data, SSLSUPP_SIGNATURE_ALGORITHMS))
       return Curl_setstropt(data, STRING_SSL_SIGNATURE_ALGORITHMS, ptr);
     return CURLE_NOT_BUILT_IN;
+  case CURLOPT_FINGERPRINT:
+    /*
+     * JSON fingerprint (JA3/JA4/Akamai) of a client to mimic.
+     */
+    if(!ptr)
+      return Curl_setstropt(data, STRING_FINGERPRINT, NULL);
+    {
+      struct Curl_fp fp;
+      result = Curl_fp_parse(ptr, &fp);
+      if(result)
+        return result;
+      if(fp.has_tls && !Curl_ssl_supports(data, SSLSUPP_FINGERPRINT))
+        return CURLE_NOT_BUILT_IN;
+      result = Curl_setstropt(data, STRING_FINGERPRINT, ptr);
+      if(!result && !CURL_EASY_STR(data, STRING_USERAGENT)) {
+        /* use the fingerprint's User-Agent unless one is already set */
+        char *ua = Curl_fp_user_agent(ptr);
+        if(ua) {
+          result = Curl_setstropt(data, STRING_USERAGENT, ua);
+          curlx_free(ua);
+        }
+      }
+      return result;
+    }
   case CURLOPT_PINNEDPUBLICKEY:
     /*
      * Set pinned public key for SSL connection.

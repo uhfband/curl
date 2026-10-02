@@ -84,6 +84,7 @@
 #include "ws.h"
 #include "bufref.h"
 #include "curlx/strparse.h"
+#include "fingerprint.h"
 
 void Curl_http_neg_init(struct Curl_easy *data, struct http_negotiation *neg)
 {
@@ -4980,6 +4981,56 @@ static bool http_TE_has_token(const char *fvalue, const char *token)
   return FALSE;
 }
 
+/* Add the request pseudo headers, in the order of CURLOPT_FINGERPRINT
+   if one is set. */
+static CURLcode http_add_pseudo_headers(struct dynhds *h2_headers,
+                                        struct httpreq *req,
+                                        struct Curl_easy *data,
+                                        const char *scheme,
+                                        const char *authority)
+{
+  const char *order = "msap";
+  struct Curl_fp *fp = NULL;
+  CURLcode result = CURLE_OK;
+
+  if(CURL_EASY_STR(data, STRING_FINGERPRINT)) {
+    fp = curlx_malloc(sizeof(*fp));
+    if(!fp)
+      return CURLE_OUT_OF_MEMORY;
+    if(!Curl_fp_parse(CURL_EASY_STR(data, STRING_FINGERPRINT), fp) &&
+       fp->h2_pseudo[0])
+      order = fp->h2_pseudo;
+  }
+
+  for(; !result && *order; order++) {
+    switch(*order) {
+    case 'm':
+      result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_METHOD),
+                               req->method, strlen(req->method));
+      break;
+    case 's':
+      if(scheme)
+        result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_SCHEME),
+                                 scheme, strlen(scheme));
+      break;
+    case 'a':
+      if(authority)
+        result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_AUTHORITY),
+                                 authority, strlen(authority));
+      break;
+    case 'p':
+      if(req->path)
+        result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_PATH),
+                                 req->path, strlen(req->path));
+      break;
+    default:
+      break;
+    }
+  }
+  curlx_free(fp);
+  return result;
+}
+
 CURLcode Curl_http_req_to_h2(struct dynhds *h2_headers,
                              struct httpreq *req, struct Curl_easy *data)
 {
@@ -5017,20 +5068,7 @@ CURLcode Curl_http_req_to_h2(struct dynhds *h2_headers,
 
   Curl_dynhds_reset(h2_headers);
   Curl_dynhds_set_opts(h2_headers, DYNHDS_OPT_LOWERCASE);
-  result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_METHOD),
-                           req->method, strlen(req->method));
-  if(!result && scheme) {
-    result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_SCHEME),
-                             scheme, strlen(scheme));
-  }
-  if(!result && authority) {
-    result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_AUTHORITY),
-                             authority, strlen(authority));
-  }
-  if(!result && req->path) {
-    result = Curl_dynhds_add(h2_headers, STRCONST(HTTP_PSEUDO_PATH),
-                             req->path, strlen(req->path));
-  }
+  result = http_add_pseudo_headers(h2_headers, req, data, scheme, authority);
   for(i = 0; !result && i < Curl_dynhds_count(&req->headers); ++i) {
     e = Curl_dynhds_getn(&req->headers, i);
     /* "TE" is special in that it is only permissible when it

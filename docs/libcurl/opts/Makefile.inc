@@ -187,6 +187,7 @@ man_MANS =                                      \
   CURLOPT_EXPECT_100_TIMEOUT_MS.3               \
   CURLOPT_FAILONERROR.3                         \
   CURLOPT_FILETIME.3                            \
+  CURLOPT_FINGERPRINT.3                         \
   CURLOPT_FNMATCH_DATA.3                        \
   CURLOPT_FNMATCH_FUNCTION.3                    \
   CURLOPT_FOLLOWLOCATION.3                      \

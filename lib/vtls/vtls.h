@@ -47,6 +47,7 @@ struct dynbuf;
 #define SSLSUPP_SSL_EC_CURVES (1 << 12) /* supports CURLOPT_SSL_EC_CURVES */
 #define SSLSUPP_CRLFILE      (1 << 13) /* supports CURLOPT_CRLFILE */
 #define SSLSUPP_ISSUERCERT_BLOB (1 << 14) /* CURLOPT_ISSUERCERT_BLOB */
+#define SSLSUPP_FINGERPRINT  (1 << 15) /* supports CURLOPT_FINGERPRINT */
 
 #ifdef USE_ECH
 /* CURLECH_ values for the tls_ech option */

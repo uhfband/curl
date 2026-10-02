@@ -47,6 +47,7 @@
 #include "curlx/dynbuf.h"
 #include "headers.h"
 #include "curl_share.h"
+#include "fingerprint.h"
 
 #if NGHTTP2_VERSION_NUM < 0x010f00
 #error "nghttp2 1.15.0 or greater required"
@@ -84,8 +85,8 @@
  * is blocked from sending us any data. See #10988 for an issue with this. */
 #define HTTP2_HUGE_WINDOW_SIZE (100 * H2_STREAM_WINDOW_SIZE_MAX)
 
-#define H2_SETTINGS_IV_LEN 3
-#define H2_BINSETTINGS_LEN 80
+#define H2_SETTINGS_IV_LEN FP_MAX_SHORT
+#define H2_BINSETTINGS_LEN (H2_SETTINGS_IV_LEN * 6)
 
 struct cf_h2_ctx {
   nghttp2_session *h2;
@@ -100,6 +101,12 @@ struct cf_h2_ctx {
   struct u32_ptrset streams; /* hash of `data->mid` to `h2_stream_ctx` */
   size_t drain_total; /* sum of all stream's UrlState drain */
   uint32_t initial_win_size; /* current initial window size (settings) */
+  /* CURLOPT_FINGERPRINT: SETTINGS, stream and connection windows to use */
+  nghttp2_settings_entry fp_iv[H2_SETTINGS_IV_LEN];
+  size_t fp_ivlen;
+  uint32_t fp_stream_win;
+  uint32_t fp_conn_win_update;
+  BIT(fp);
   uint32_t max_concurrent_streams;
   uint32_t goaway_error;        /* goaway error code from server */
   int32_t remote_max_sid;       /* max id processed by server */
@@ -199,15 +206,22 @@ static void cf_h2_ctx_free(struct cf_h2_ctx *ctx)
   curlx_free(ctx);
 }
 
-static uint32_t cf_h2_initial_win_size(struct Curl_easy *data)
+static uint32_t cf_h2_initial_win_size(struct cf_h2_ctx *ctx,
+                                       struct Curl_easy *data)
 {
+  if(ctx && ctx->fp)
+    return ctx->fp_stream_win;
 #if NGHTTP2_HAS_SET_LOCAL_WINDOW_SIZE
-  /* If the transfer has a rate-limit lower than the default initial
-   * stream window size, use that. It needs to be at least 8k or servers
-   * may be unhappy. */
-  curl_off_t rps = Curl_rlimit_per_step(&data->progress.dl.rlimit);
-  if((rps > 0) && (rps < H2_STREAM_WINDOW_SIZE_INITIAL))
-    return CURLMAX((uint32_t)rps, 8192);
+  {
+    /* If the transfer has a rate-limit lower than the default initial
+     * stream window size, use that. It needs to be at least 8k or servers
+     * may be unhappy. */
+    curl_off_t rps = Curl_rlimit_per_step(&data->progress.dl.rlimit);
+    if((rps > 0) && (rps < H2_STREAM_WINDOW_SIZE_INITIAL))
+      return CURLMAX((uint32_t)rps, 8192);
+  }
+#else
+  (void)data;
 #endif
   return H2_STREAM_WINDOW_SIZE_INITIAL;
 }
@@ -216,11 +230,18 @@ static size_t populate_settings(nghttp2_settings_entry *iv,
                                 struct Curl_easy *data,
                                 struct cf_h2_ctx *ctx)
 {
+  if(ctx && ctx->fp) {
+    /* send exactly the SETTINGS of the fingerprint */
+    memcpy(iv, ctx->fp_iv, ctx->fp_ivlen * sizeof(*iv));
+    ctx->initial_win_size = ctx->fp_stream_win;
+    return ctx->fp_ivlen;
+  }
+
   iv[0].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
   iv[0].value = Curl_multi_max_concurrent_streams(data->multi);
 
   iv[1].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
-  iv[1].value = cf_h2_initial_win_size(data);
+  iv[1].value = cf_h2_initial_win_size(ctx, data);
   if(ctx)
     ctx->initial_win_size = iv[1].value;
   iv[2].settings_id = NGHTTP2_SETTINGS_ENABLE_PUSH;
@@ -277,7 +298,8 @@ static struct h2_stream_ctx *h2_stream_ctx_create(struct cf_h2_ctx *ctx)
   stream->closed = FALSE;
   stream->close_handled = FALSE;
   stream->error = NGHTTP2_NO_ERROR;
-  stream->local_window_size = H2_STREAM_WINDOW_SIZE_INITIAL;
+  stream->local_window_size = ctx->fp ? (int32_t)ctx->fp_stream_win :
+                              H2_STREAM_WINDOW_SIZE_INITIAL;
   stream->nrcvd_data = 0;
   return stream;
 }
@@ -286,15 +308,17 @@ static struct h2_stream_ctx *h2_stream_ctx_create(struct cf_h2_ctx *ctx)
 static int32_t cf_h2_get_desired_local_win(struct Curl_cfilter *cf,
                                            struct Curl_easy *data)
 {
+  struct cf_h2_ctx *ctx = cf->ctx;
   curl_off_t avail = Curl_rlimit_avail(&data->progress.dl.rlimit, NULL);
 
-  (void)cf;
   if(avail < CURL_OFF_T_MAX) { /* limit in place */
     if(avail <= 0)
       return 0;
     else if(avail < INT32_MAX)
       return (int32_t)avail;
   }
+  if(ctx->fp) /* do not grow stream windows beyond the fingerprint's */
+    return (int32_t)ctx->fp_stream_win;
   return H2_STREAM_WINDOW_SIZE_MAX;
 }
 
@@ -2142,7 +2166,7 @@ static CURLcode h2_submit(struct h2_stream_ctx **pstream,
 
   /* Check the initial windows size of the transfer (rate-limits?) and
    * send an updated settings on changes from previous value. */
-  initial_win_size = cf_h2_initial_win_size(data);
+  initial_win_size = cf_h2_initial_win_size(ctx, data);
   if(initial_win_size != ctx->initial_win_size) {
     result = cf_h2_update_settings(ctx, initial_win_size);
     if(result)
@@ -2408,6 +2432,27 @@ static CURLcode cf_h2_ctx_open(struct Curl_cfilter *cf,
   DEBUGASSERT(!ctx->h2);
   DEBUGASSERT(ctx->initialized);
 
+  if(CURL_EASY_STR(data, STRING_FINGERPRINT)) {
+    struct Curl_fp *fp = curlx_malloc(sizeof(*fp));
+    if(!fp)
+      goto out;
+    if(!Curl_fp_parse(CURL_EASY_STR(data, STRING_FINGERPRINT), fp) && fp->has_h2) {
+      size_t i;
+      for(i = 0; i < fp->nh2_settings; i++) {
+        ctx->fp_iv[i].settings_id = fp->h2_settings[i].id;
+        ctx->fp_iv[i].value = fp->h2_settings[i].value;
+      }
+      ctx->fp_ivlen = fp->nh2_settings;
+      ctx->fp_stream_win = Curl_fp_h2_initial_window(fp);
+      if(!ctx->fp_stream_win)
+        ctx->fp_stream_win = NGHTTP2_INITIAL_WINDOW_SIZE;
+      ctx->fp_conn_win_update = fp->h2_window_update;
+      ctx->fp = TRUE;
+      CURL_TRC_CF(data, cf, "using HTTP/2 fingerprint");
+    }
+    curlx_free(fp);
+  }
+
   rc = nghttp2_session_callbacks_new(&cbs);
   if(rc) {
     failf(data, "Could not initialize nghttp2 callbacks");
@@ -2497,8 +2542,15 @@ static CURLcode cf_h2_ctx_open(struct Curl_cfilter *cf,
     }
   }
 
-  rc = nghttp2_session_set_local_window_size(ctx->h2, NGHTTP2_FLAG_NONE, 0,
-                                             HTTP2_HUGE_WINDOW_SIZE);
+  if(ctx->fp)
+    rc = nghttp2_session_set_local_window_size(ctx->h2, NGHTTP2_FLAG_NONE, 0,
+           (int32_t)(NGHTTP2_INITIAL_CONNECTION_WINDOW_SIZE +
+                     CURLMIN(ctx->fp_conn_win_update,
+                             INT32_MAX -
+                             NGHTTP2_INITIAL_CONNECTION_WINDOW_SIZE)));
+  else
+    rc = nghttp2_session_set_local_window_size(ctx->h2, NGHTTP2_FLAG_NONE, 0,
+                                               HTTP2_HUGE_WINDOW_SIZE);
   if(rc) {
     failf(data, "nghttp2_session_set_local_window_size() failed: %s(%d)",
           nghttp2_strerror(rc), rc);

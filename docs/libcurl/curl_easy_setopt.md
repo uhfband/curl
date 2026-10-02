@@ -322,6 +322,10 @@ Fail on HTTP 4xx errors. CURLOPT_FAILONERROR(3)
 
 Request file modification date and time. See CURLOPT_FILETIME(3)
 
+## CURLOPT_FINGERPRINT
+
+Client TLS and HTTP/2 fingerprint to mimic. See CURLOPT_FINGERPRINT(3)
+
 ## CURLOPT_FNMATCH_DATA
 
 Data pointer to pass to the wildcard matching callback. See

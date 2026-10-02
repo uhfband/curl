@@ -408,6 +408,9 @@ static CURLcode ssl_setopts(struct OperationConfig *config, CURL *curl)
     MY_SETOPT_STR(curl, CURLOPT_SSL_SIGNATURE_ALGORITHMS,
                   config->ssl_signature_algorithms);
 
+  if(config->fingerprint)
+    MY_SETOPT_STR(curl, CURLOPT_FINGERPRINT, config->fingerprint);
+
   if(config->writeout)
     my_setopt_long(curl, CURLOPT_CERTINFO, 1);
 
@@ -971,8 +974,12 @@ static CURLcode credentials_and_headers_setopts(struct OperationConfig *config,
 
   if(proto_http || proto_rtsp) {
     MY_SETOPT_STR(curl, CURLOPT_REFERER, config->referer);
-    MY_SETOPT_STR(curl, CURLOPT_USERAGENT, config->useragent ?
-                  config->useragent : CURL_NAME "/" CURL_VERSION);
+    if(config->useragent)
+      MY_SETOPT_STR(curl, CURLOPT_USERAGENT, config->useragent);
+    else if(!config->fingerprint ||
+            !strstr(config->fingerprint, "\"user_agent\""))
+      /* else the fingerprint provides it */
+      MY_SETOPT_STR(curl, CURLOPT_USERAGENT, CURL_NAME "/" CURL_VERSION);
   }
 
   MY_SETOPT_STR(curl, CURLOPT_KEYPASSWD, config->key_passwd);

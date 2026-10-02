@@ -135,6 +135,7 @@ static const struct LongShort aliases[] = {
   {"fail-early",                 ARG_BOOL, ' ', C_FAIL_EARLY},
   {"fail-with-body",             ARG_BOOL, ' ', C_FAIL_WITH_BODY},
   {"false-start",                ARG_BOOL, ' ', C_FALSE_START},
+  {"fingerprint",                ARG_STRG|ARG_TLS, ' ', C_FINGERPRINT},
   {"follow",                     ARG_BOOL, ' ', C_FOLLOW},
   {"form",                       ARG_STRG, 'F', C_FORM},
   {"form-escape",                ARG_BOOL, ' ', C_FORM_ESCAPE},
@@ -2843,6 +2844,25 @@ static ParameterError opt_string(struct OperationConfig *config,
     break;
   case C_SIGNATURE_ALGORITHMS: /* --sigalgs */
     err = getstr(&config->ssl_signature_algorithms, nextarg, DENY_BLANK);
+    break;
+  case C_FINGERPRINT: /* --fingerprint */
+    curlx_safefree(config->fingerprint);
+    if(nextarg[0] == '{')
+      /* inline JSON */
+      err = getstr(&config->fingerprint, nextarg, DENY_BLANK);
+    else {
+      bool use_stdin = !strcmp(nextarg, "-");
+      FILE *file = use_stdin ? stdin : curlx_fopen(nextarg, FOPEN_READTEXT);
+      if(!file) {
+        errorf("Failed to open %s", nextarg);
+        err = PARAM_READ_ERROR;
+      }
+      else {
+        err = file2string(&config->fingerprint, file);
+        if(!use_stdin)
+          curlx_fclose(file);
+      }
+    }
     break;
   case C_FORM: /* --form */
   case C_FORM_STRING: /* --form-string */

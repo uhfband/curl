@@ -2288,6 +2288,9 @@ typedef enum {
   /* Space-separated list of components to sign for HTTP Message Signatures */
   CURLOPT(CURLOPT_HTTPSIG_HEADERS, CURLOPTTYPE_STRINGPOINT, 332),
 
+  /* JSON document describing a client (TLS/HTTP2) fingerprint to mimic */
+  CURLOPT(CURLOPT_FINGERPRINT, CURLOPTTYPE_STRINGPOINT, 333),
+
   CURLOPT_LASTENTRY /* the last unused */
 } CURLoption;
 

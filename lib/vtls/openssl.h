@@ -126,6 +126,12 @@ struct ossl_ctx {
      This is a bool and not a bitfield because it is passed by address. */
   bool keylog_done;
 #endif
+#ifdef OPENSSL_HAS_CLIENT_EXTENSION_ORDER
+  /* payloads of fingerprint extensions OpenSSL does not implement */
+  unsigned char fp_dc[2 + (2 * 16)]; /* delegated_credentials */
+  size_t fp_dc_len;
+  unsigned char fp_rsl[2];           /* record_size_limit */
+#endif
   BIT(x509_store_setup);            /* x509 store has been set up */
   BIT(store_is_empty);              /* no certs/paths/blobs in x509 store */
   BIT(reused_session);              /* session-ID was reused for this */

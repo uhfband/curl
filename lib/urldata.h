@@ -810,6 +810,7 @@ enum dupstring {
   STRING_ECH_CONFIG,            /* CURLOPT_ECH_CONFIG */
   STRING_ECH_PUBLIC,            /* CURLOPT_ECH_PUBLIC */
   STRING_SSL_SIGNATURE_ALGORITHMS, /* CURLOPT_SSL_SIGNATURE_ALGORITHMS */
+  STRING_FINGERPRINT,           /* CURLOPT_FINGERPRINT */
 
   STRING_LAST /* not used, an end-of-list marker */
 };

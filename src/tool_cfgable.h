@@ -127,6 +127,7 @@ struct OperationConfig {
   char *customrequest;
   char *ssl_ec_curves;
   char *ssl_signature_algorithms;
+  char *fingerprint; /* JSON for CURLOPT_FINGERPRINT */
   char *krblevel;
   char *request_target;
   char *writeout;           /* %-styled format string to output */

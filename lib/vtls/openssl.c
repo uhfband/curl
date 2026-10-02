@@ -52,6 +52,7 @@
 #include "vdns/cf-dns.h"
 #include "vdns/httpsrr.h"
 #include "vtls/apple.h"
+#include "fingerprint.h"
 #ifdef USE_ECH
 #include "curlx/base64.h"
 #endif
@@ -3697,6 +3698,486 @@ static CURLcode ossl_init_method(struct Curl_cfilter *cf,
   return *pmethod ? CURLE_OK : CURLE_SSL_CONNECT_ERROR;
 }
 
+#ifdef OPENSSL_HAS_CLIENT_EXTENSION_ORDER
+#define FP_EXT_RECORD_SIZE_LIMIT  28
+#define FP_EXT_DELEGATED_CREDS    34
+#define FP_EXT_ECH                0xfe0d
+#define FP_EXT_ALPS_OLD           17513
+#define FP_EXT_ALPS               17613
+#define FP_EXT_TRUST_ANCHORS      51764
+
+/* extensions sent with a fixed payload */
+struct fp_const_ext {
+  uint16_t type;
+  unsigned int context;
+  const unsigned char *data;
+  size_t len;
+};
+
+/* ALPS (application_settings): supported protocols, "h2" */
+static const unsigned char fp_alps_h2[] = { 0x00, 0x03, 0x02, 'h', '2' };
+/* trust_anchors: empty trust anchor id list */
+static const unsigned char fp_empty_list[] = { 0x00, 0x00 };
+
+static const struct fp_const_ext fp_const_exts[] = {
+  { FP_EXT_ALPS_OLD, SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ONLY |
+    SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS, fp_alps_h2, sizeof(fp_alps_h2) },
+  { FP_EXT_ALPS, SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ONLY |
+    SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS, fp_alps_h2, sizeof(fp_alps_h2) },
+  { FP_EXT_TRUST_ANCHORS, SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ONLY |
+    SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS | SSL_EXT_TLS1_3_CERTIFICATE,
+    fp_empty_list, sizeof(fp_empty_list) },
+};
+
+static int fp_const_ext_add(SSL *ssl, unsigned int ext_type,
+                            unsigned int context, const unsigned char **out,
+                            size_t *outlen, X509 *x, size_t chainidx,
+                            int *al, void *add_arg)
+{
+  const struct fp_const_ext *e = add_arg;
+  (void)ssl;
+  (void)ext_type;
+  (void)context;
+  (void)x;
+  (void)chainidx;
+  (void)al;
+  *out = e->data;
+  *outlen = e->len;
+  return 1;
+}
+
+static const struct {
+  uint16_t code;
+  const char *name;
+} fp_sigalgs[] = {
+  { 0x0201, "rsa_pkcs1_sha1" },
+  { 0x0202, "dsa_sha1" },
+  { 0x0203, "ecdsa_sha1" },
+  { 0x0301, "rsa_pkcs1_sha224" },
+  { 0x0302, "dsa_sha224" },
+  { 0x0303, "ecdsa_sha224" },
+  { 0x0401, "rsa_pkcs1_sha256" },
+  { 0x0402, "dsa_sha256" },
+  { 0x0403, "ecdsa_secp256r1_sha256" },
+  { 0x0501, "rsa_pkcs1_sha384" },
+  { 0x0502, "dsa_sha384" },
+  { 0x0503, "ecdsa_secp384r1_sha384" },
+  { 0x0601, "rsa_pkcs1_sha512" },
+  { 0x0602, "dsa_sha512" },
+  { 0x0603, "ecdsa_secp521r1_sha512" },
+  { 0x0804, "rsa_pss_rsae_sha256" },
+  { 0x0805, "rsa_pss_rsae_sha384" },
+  { 0x0806, "rsa_pss_rsae_sha512" },
+  { 0x0807, "ed25519" },
+  { 0x0808, "ed448" },
+  { 0x0809, "rsa_pss_pss_sha256" },
+  { 0x080a, "rsa_pss_pss_sha384" },
+  { 0x080b, "rsa_pss_pss_sha512" },
+  { 0x081a, "ecdsa_brainpoolP256r1tls13_sha256" },
+  { 0x081b, "ecdsa_brainpoolP384r1tls13_sha384" },
+  { 0x081c, "ecdsa_brainpoolP512r1tls13_sha512" },
+  { 0x0904, "mldsa44" },
+  { 0x0905, "mldsa65" },
+  { 0x0906, "mldsa87" },
+};
+
+/* ClientHello extensions OpenSSL builds itself when configured */
+static bool fp_ext_builtin(uint16_t type)
+{
+  switch(type) {
+  case 0: case 1: case 5: case 10: case 11: case 13: case 16: case 18:
+  case 21: case 22: case 23: case 27: case 35: case 41: case 42: case 43:
+  case 44: case 45: case 49: case 51: case 0xff01:
+  case FP_EXT_RECORD_SIZE_LIMIT: case FP_EXT_DELEGATED_CREDS: case FP_EXT_ECH:
+  case FP_EXT_ALPS_OLD: case FP_EXT_ALPS: case FP_EXT_TRUST_ANCHORS:
+    return TRUE;
+  default:
+    return FALSE;
+  }
+}
+
+static int fp_static_ext_add(SSL *ssl, unsigned int ext_type,
+                             unsigned int context, const unsigned char **out,
+                             size_t *outlen, X509 *x, size_t chainidx,
+                             int *al, void *add_arg)
+{
+  struct ossl_ctx *octx = add_arg;
+  (void)ssl;
+  (void)context;
+  (void)x;
+  (void)chainidx;
+  (void)al;
+  if(ext_type == FP_EXT_DELEGATED_CREDS) {
+    *out = octx->fp_dc;
+    *outlen = octx->fp_dc_len;
+  }
+  else {
+    *out = octx->fp_rsl;
+    *outlen = sizeof(octx->fp_rsl);
+  }
+  return 1;
+}
+
+static int fp_ext_parse(SSL *ssl, unsigned int ext_type, unsigned int context,
+                        const unsigned char *in, size_t inlen, X509 *x,
+                        size_t chainidx, int *al, void *parse_arg)
+{
+  (void)context;
+  (void)x;
+  (void)chainidx;
+  (void)al;
+  (void)parse_arg;
+  if(ext_type == FP_EXT_RECORD_SIZE_LIMIT && inlen == 2) {
+    /* honor the peer's record size limit for what we send */
+    unsigned int limit = ((unsigned int)in[0] << 8) | in[1];
+    if(SSL_version(ssl) >= TLS1_3_VERSION && limit)
+      limit--; /* includes the content type byte */
+    if(limit < 512)
+      limit = 512;
+    if(limit < SSL3_RT_MAX_PLAIN_LENGTH)
+      SSL_set_max_send_fragment(ssl, limit);
+  }
+  /* ECH retry configs and anything else are ignored */
+  return 1;
+}
+
+/* GREASE encrypted_client_hello, as sent by browsers without ECH configs */
+static int fp_ech_grease_add(SSL *ssl, unsigned int ext_type,
+                             unsigned int context, const unsigned char **out,
+                             size_t *outlen, X509 *x, size_t chainidx,
+                             int *al, void *add_arg)
+{
+  const size_t enclen = 32, payloadlen = 239;
+  size_t len = 1 + 4 + 1 + 2 + enclen + 2 + payloadlen;
+  unsigned char *p = OPENSSL_malloc(len);
+  (void)ssl;
+  (void)ext_type;
+  (void)context;
+  (void)x;
+  (void)chainidx;
+  (void)add_arg;
+  if(!p) {
+    *al = SSL_AD_INTERNAL_ERROR;
+    return -1;
+  }
+  p[0] = 0;          /* ClientHelloOuter */
+  p[1] = 0x00;       /* kdf: HKDF-SHA256 */
+  p[2] = 0x01;
+  p[3] = 0x00;       /* aead: AES-128-GCM */
+  p[4] = 0x01;
+  /* config_id, enc and payload are random */
+  if(RAND_bytes(p + 5, 1) != 1 ||
+     RAND_bytes(p + 8, (int)enclen) != 1 ||
+     RAND_bytes(p + 8 + enclen + 2, (int)payloadlen) != 1) {
+    OPENSSL_free(p);
+    *al = SSL_AD_INTERNAL_ERROR;
+    return -1;
+  }
+  p[6] = (unsigned char)(enclen >> 8);
+  p[7] = (unsigned char)(enclen & 0xff);
+  p[8 + enclen] = (unsigned char)(payloadlen >> 8);
+  p[8 + enclen + 1] = (unsigned char)(payloadlen & 0xff);
+  *out = p;
+  *outlen = len;
+  return 1;
+}
+
+static void fp_ech_grease_free(SSL *ssl, unsigned int ext_type,
+                               unsigned int context, const unsigned char *out,
+                               void *add_arg)
+{
+  (void)ssl;
+  (void)ext_type;
+  (void)context;
+  (void)add_arg;
+  OPENSSL_free(CURL_UNCONST(out));
+}
+
+static bool fp_list_has(const uint16_t *list, size_t n, uint16_t v)
+{
+  size_t i;
+  for(i = 0; i < n; i++)
+    if(list[i] == v)
+      return TRUE;
+  return FALSE;
+}
+
+/* Configure the SSL_CTX so that its ClientHello matches the fingerprint
+   given with CURLOPT_FINGERPRINT. Explicitly set ciphers, curves and
+   signature algorithms take precedence. */
+static CURLcode ossl_apply_fingerprint(struct Curl_easy *data,
+                                       struct ossl_ctx *octx,
+                                       struct ssl_filter_config *conn_config)
+{
+  SSL_CTX *ctx = octx->ssl_ctx;
+  struct Curl_fp *fp;
+  struct dynbuf c12, c13, list;
+  SSL *tmp = NULL;
+  CURLcode result;
+  size_t i;
+  bool sha1 = FALSE;
+  const unsigned int ext_ctx_ch = SSL_EXT_CLIENT_HELLO;
+
+  fp = curlx_malloc(sizeof(*fp));
+  if(!fp)
+    return CURLE_OUT_OF_MEMORY;
+  curlx_dyn_init(&c12, 4096);
+  curlx_dyn_init(&c13, 1024);
+  curlx_dyn_init(&list, 4096);
+
+  result = Curl_fp_parse(conn_config->fingerprint, fp);
+  if(result || !fp->has_tls)
+    goto out;
+
+  tmp = SSL_new(ctx);
+  if(!tmp) {
+    result = CURLE_OUT_OF_MEMORY;
+    goto out;
+  }
+
+  for(i = 0; i < fp->nsigalgs; i++)
+    if((fp->sigalgs[i] & 0xff00) == 0x0200)
+      sha1 = TRUE;
+
+  /* cipher suites */
+  if(!conn_config->cipher_list && !conn_config->cipher_list13 &&
+     fp->nciphers) {
+    for(i = 0; i < fp->nciphers && !result; i++) {
+      unsigned char id[2];
+      const SSL_CIPHER *c;
+      id[0] = (unsigned char)(fp->ciphers[i] >> 8);
+      id[1] = (unsigned char)(fp->ciphers[i] & 0xff);
+      c = SSL_CIPHER_find(tmp, id);
+      if(!c) {
+        infof(data, "fingerprint: cipher 0x%04x not supported, skipped",
+              fp->ciphers[i]);
+        continue;
+      }
+      if(id[0] == 0x13)
+        result = curlx_dyn_addf(&c13, "%s%s", curlx_dyn_len(&c13) ? ":" : "",
+                                SSL_CIPHER_get_name(c));
+      else
+        result = curlx_dyn_addf(&c12, "%s%s", curlx_dyn_len(&c12) ? ":" : "",
+                                SSL_CIPHER_get_name(c));
+    }
+    if(!result && sha1 && curlx_dyn_len(&c12))
+      result = curlx_dyn_add(&c12, ":@SECLEVEL=0");
+    if(result)
+      goto out;
+    if(curlx_dyn_len(&c12) &&
+       !SSL_CTX_set_cipher_list(ctx, curlx_dyn_ptr(&c12))) {
+      failf(data, "fingerprint: failed setting cipher list: %s",
+            curlx_dyn_ptr(&c12));
+      result = CURLE_SSL_CIPHER;
+      goto out;
+    }
+    if(curlx_dyn_len(&c13) &&
+       !SSL_CTX_set_ciphersuites(ctx, curlx_dyn_ptr(&c13))) {
+      failf(data, "fingerprint: failed setting TLS 1.3 ciphers: %s",
+            curlx_dyn_ptr(&c13));
+      result = CURLE_SSL_CIPHER;
+      goto out;
+    }
+  }
+  else if(sha1)
+    SSL_CTX_set_security_level(ctx, 0);
+
+  /* supported groups and key shares */
+  if(!conn_config->curves && fp->ngroups) {
+    curlx_dyn_reset(&list);
+    for(i = 0; i < fp->ngroups && !result; i++) {
+      const char *name =
+        SSL_group_to_name(tmp, TLSEXT_nid_unknown | (int)fp->groups[i]);
+      if(!name) {
+        infof(data, "fingerprint: group 0x%04x not supported, skipped",
+              fp->groups[i]);
+        continue;
+      }
+      result = curlx_dyn_addf(&list, "%s%s%s",
+                              curlx_dyn_len(&list) ? ":" : "",
+                              fp_list_has(fp->key_shares, fp->nkey_shares,
+                                          fp->groups[i]) ? "*" : "",
+                              name);
+    }
+    if(result)
+      goto out;
+    if(curlx_dyn_len(&list) &&
+       !SSL_CTX_set1_groups_list(ctx, curlx_dyn_ptr(&list))) {
+      failf(data, "fingerprint: failed setting groups: %s",
+            curlx_dyn_ptr(&list));
+      result = CURLE_SSL_CIPHER;
+      goto out;
+    }
+  }
+
+  /* signature algorithms */
+  if(!conn_config->signature_algorithms && fp->nsigalgs) {
+    curlx_dyn_reset(&list);
+    for(i = 0; i < fp->nsigalgs && !result; i++) {
+      size_t j;
+      for(j = 0; j < CURL_ARRAYSIZE(fp_sigalgs); j++) {
+        if(fp_sigalgs[j].code == fp->sigalgs[i])
+          break;
+      }
+      if(j == CURL_ARRAYSIZE(fp_sigalgs)) {
+        infof(data, "fingerprint: sigalg 0x%04x not supported, skipped",
+              fp->sigalgs[i]);
+        continue;
+      }
+      result = curlx_dyn_addf(&list, "%s%s", curlx_dyn_len(&list) ? ":" : "",
+                              fp_sigalgs[j].name);
+    }
+    if(result)
+      goto out;
+    if(curlx_dyn_len(&list) &&
+       !SSL_CTX_set1_sigalgs_list(ctx, curlx_dyn_ptr(&list))) {
+      failf(data, "fingerprint: failed setting signature algorithms: %s",
+            curlx_dyn_ptr(&list));
+      result = CURLE_SSL_CIPHER;
+      goto out;
+    }
+  }
+
+  if(fp->nec_point_formats &&
+     !SSL_CTX_set1_ec_point_formats(ctx, fp->ec_point_formats,
+                                    fp->nec_point_formats)) {
+    result = CURLE_OUT_OF_MEMORY;
+    goto out;
+  }
+
+  if(fp->tls_max == 0x0303 &&
+     (!conn_config->version_max ||
+      conn_config->version_max == CURL_SSLVERSION_MAX_DEFAULT))
+    SSL_CTX_set_max_proto_version(ctx, TLS1_2_VERSION);
+
+  if(fp->nexts) {
+    /* toggle optional extensions OpenSSL implements */
+    if(Curl_fp_has_ext(fp, 35))
+      SSL_CTX_clear_options(ctx, SSL_OP_NO_TICKET);
+    else
+      SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
+    if(!Curl_fp_has_ext(fp, 22))
+      SSL_CTX_set_options(ctx, SSL_OP_NO_ENCRYPT_THEN_MAC);
+    if(!Curl_fp_has_ext(fp, 23))
+      SSL_CTX_set_options(ctx, SSL_OP_NO_EXTENDED_MASTER_SECRET);
+    if(Curl_fp_has_ext(fp, 21))
+      SSL_CTX_set_options(ctx, SSL_OP_TLSEXT_PADDING);
+    if(!Curl_fp_has_ext(fp, 49))
+      SSL_CTX_set_post_handshake_auth(ctx, 0);
+#ifndef OPENSSL_NO_OCSP
+    if(Curl_fp_has_ext(fp, 5))
+      SSL_CTX_set_tlsext_status_type(ctx, TLSEXT_STATUSTYPE_ocsp);
+#endif
+#ifndef OPENSSL_NO_CT
+    if(Curl_fp_has_ext(fp, 18))
+      (void)SSL_CTX_enable_ct(ctx, SSL_CT_VALIDATION_PERMISSIVE);
+#endif
+#ifndef OPENSSL_NO_COMP_ALG
+    if(Curl_fp_has_ext(fp, 27) && fp->ncert_comp) {
+      int algs[FP_MAX_SHORT];
+      for(i = 0; i < fp->ncert_comp; i++)
+        algs[i] = fp->cert_comp[i];
+      if(!SSL_CTX_set1_cert_comp_preference(ctx, algs, fp->ncert_comp))
+        infof(data, "fingerprint: certificate compression not available");
+    }
+    else
+#endif
+      SSL_CTX_set_options(ctx, SSL_OP_NO_RX_CERTIFICATE_COMPRESSION);
+
+    /* extensions OpenSSL does not implement, added as custom ones */
+    if(Curl_fp_has_ext(fp, FP_EXT_DELEGATED_CREDS)) {
+      unsigned char *p = octx->fp_dc;
+      p[0] = (unsigned char)((fp->ndc_sigalgs * 2) >> 8);
+      p[1] = (unsigned char)((fp->ndc_sigalgs * 2) & 0xff);
+      for(i = 0; i < fp->ndc_sigalgs; i++) {
+        p[2 + (i * 2)] = (unsigned char)(fp->dc_sigalgs[i] >> 8);
+        p[3 + (i * 2)] = (unsigned char)(fp->dc_sigalgs[i] & 0xff);
+      }
+      octx->fp_dc_len = 2 + (fp->ndc_sigalgs * 2);
+      if(!SSL_CTX_add_custom_ext(ctx, FP_EXT_DELEGATED_CREDS,
+                                 ext_ctx_ch | SSL_EXT_TLS1_3_ONLY,
+                                 fp_static_ext_add, NULL, octx,
+                                 fp_ext_parse, NULL))
+        infof(data, "fingerprint: cannot add delegated_credentials");
+    }
+    if(Curl_fp_has_ext(fp, FP_EXT_RECORD_SIZE_LIMIT)) {
+      octx->fp_rsl[0] = (unsigned char)(fp->record_size_limit >> 8);
+      octx->fp_rsl[1] = (unsigned char)(fp->record_size_limit & 0xff);
+      if(!SSL_CTX_add_custom_ext(ctx, FP_EXT_RECORD_SIZE_LIMIT,
+                                 ext_ctx_ch | SSL_EXT_TLS1_2_SERVER_HELLO |
+                                 SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS,
+                                 fp_static_ext_add, NULL, octx,
+                                 fp_ext_parse, NULL))
+        infof(data, "fingerprint: cannot add record_size_limit");
+    }
+    if(Curl_fp_has_ext(fp, FP_EXT_ECH)) {
+      if(!SSL_CTX_add_custom_ext(ctx, FP_EXT_ECH,
+                                 ext_ctx_ch | SSL_EXT_TLS1_3_ONLY |
+                                 SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS,
+                                 fp_ech_grease_add, fp_ech_grease_free, NULL,
+                                 fp_ext_parse, NULL))
+        infof(data, "fingerprint: cannot add encrypted_client_hello");
+    }
+    for(i = 0; i < CURL_ARRAYSIZE(fp_const_exts); i++) {
+      const struct fp_const_ext *e = &fp_const_exts[i];
+      if(Curl_fp_has_ext(fp, e->type) &&
+         !SSL_CTX_add_custom_ext(ctx, e->type, e->context,
+                                 fp_const_ext_add, NULL, CURL_UNCONST(e),
+                                 fp_ext_parse, NULL))
+        infof(data, "fingerprint: cannot add extension %u", e->type);
+    }
+#ifdef OPENSSL_HAS_CLIENT_ENCRYPTED_EXTENSION
+    {
+      /* When the server accepts ALPS, answer with our HTTP/2 SETTINGS in a
+         client EncryptedExtensions message, as Chrome does. */
+      uint16_t alps = Curl_fp_has_ext(fp, FP_EXT_ALPS) ? FP_EXT_ALPS :
+                      Curl_fp_has_ext(fp, FP_EXT_ALPS_OLD) ? FP_EXT_ALPS_OLD :
+                      0;
+      if(alps) {
+        unsigned char settings[FP_MAX_SHORT * 6];
+        size_t slen = 0;
+        for(i = 0; i < fp->nh2_settings; i++) {
+          uint32_t v = fp->h2_settings[i].value;
+          settings[slen++] = (unsigned char)(fp->h2_settings[i].id >> 8);
+          settings[slen++] = (unsigned char)(fp->h2_settings[i].id & 0xff);
+          settings[slen++] = (unsigned char)(v >> 24);
+          settings[slen++] = (unsigned char)((v >> 16) & 0xff);
+          settings[slen++] = (unsigned char)((v >> 8) & 0xff);
+          settings[slen++] = (unsigned char)(v & 0xff);
+        }
+        if(!SSL_CTX_set1_client_encrypted_extension(ctx, alps, settings,
+                                                    slen)) {
+          result = CURLE_OUT_OF_MEMORY;
+          goto out;
+        }
+      }
+    }
+#endif
+    for(i = 0; i < fp->nexts; i++) {
+      if(!fp_ext_builtin(fp->exts[i]))
+        infof(data, "fingerprint: extension %u not supported, skipped",
+              fp->exts[i]);
+    }
+
+    if(!SSL_CTX_set1_client_extension_order(ctx, fp->exts, fp->nexts)) {
+      result = CURLE_OUT_OF_MEMORY;
+      goto out;
+    }
+  }
+  infof(data, "TLS fingerprint applied (%zu ciphers, %zu extensions)",
+        fp->nciphers, fp->nexts);
+
+out:
+  if(tmp)
+    SSL_free(tmp);
+  curlx_dyn_free(&c12);
+  curlx_dyn_free(&c13);
+  curlx_dyn_free(&list);
+  curlx_free(fp);
+  return result;
+}
+#endif /* OPENSSL_HAS_CLIENT_EXTENSION_ORDER */
+
 CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
                             struct Curl_cfilter *cf,
                             struct Curl_easy *data,
@@ -3927,6 +4408,14 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
         return CURLE_SSL_CIPHER;
       }
     }
+  }
+#endif
+
+#ifdef OPENSSL_HAS_CLIENT_EXTENSION_ORDER
+  if(conn_config->fingerprint && (peer->transport == TRNSPRT_TCP)) {
+    result = ossl_apply_fingerprint(data, octx, conn_config);
+    if(result)
+      return result;
   }
 #endif
 
@@ -5536,6 +6025,9 @@ const struct Curl_ssl Curl_ssl_openssl = {
 #endif
 #ifdef HAVE_SSL_SET1_ECH_CONFIG_LIST
   SSLSUPP_ECH |
+#endif
+#ifdef OPENSSL_HAS_CLIENT_EXTENSION_ORDER
+  SSLSUPP_FINGERPRINT |
 #endif
   SSLSUPP_CA_CACHE |
   SSLSUPP_HTTPS_PROXY |
